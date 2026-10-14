@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mnemo</title>
+  <meta name="description" content="Spaced-repetition flashcards that open Anki decks, work offline and stay on your device.">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="light dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mnemo">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    // Applique le thème avant le premier rendu pour éviter un flash
+    try {
+      var s = JSON.parse(localStorage.getItem('mnemo-theme') || '{}');
+      var dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      var th = s.theme && s.theme !== 'system' ? s.theme : (dark ? 'dark' : 'light');
+      document.documentElement.dataset.theme = th;
+      document.documentElement.dataset.mode = th === 'light' ? 'light' : 'dark';
+      if (s.accent) document.documentElement.style.setProperty('--accent', s.accent);
+    } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <main id="view"></main>
+    <nav id="tabbar" aria-label="Navigation"></nav>
+  </div>
+  <noscript>Mnemo needs JavaScript. / Mnemo a besoin de JavaScript.</noscript>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
