@@ -88,7 +88,7 @@ let saveTimer = null;
 function saveNow() {
   clearTimeout(saveTimer); saveTimer = null;
   persist.putKV('sync', {
-    cfg: st.cfg, auth: st.auth, lastSeq: st.lastSeq, initialDone: st.initialDone, lastSync: st.lastSync,
+    cfg: st.cfg, auth: st.auth, lastSeq: st.lastSeq, initialDone: st.initialDone, lastSync: st.lastSync, firstUpload: st.firstUpload || null,
     dirty: [...st.dirty], pendingMedia: [...st.pendingMedia],
   });
 }
@@ -107,7 +107,7 @@ function mark(kind, id) {
 export function initSync() {
   const saved = S.kv?.sync || {};
   st.cfg = saved.cfg || null; st.auth = saved.auth || null;
-  st.lastSeq = saved.lastSeq || 0; st.initialDone = !!saved.initialDone; st.lastSync = saved.lastSync || 0;
+  st.lastSeq = saved.lastSeq || 0; st.initialDone = !!saved.initialDone; st.lastSync = saved.lastSync || 0; st.firstUpload = saved.firstUpload || null;
   st.dirty = new Map(saved.dirty || []); st.pendingMedia = new Map(saved.pendingMedia || []);
   const put = persist.put, del = persist.del;
   persist.put = (store, obj) => { put(store, obj); if (KINDS.includes(store)) mark(store, obj.id); };
@@ -155,17 +155,28 @@ function refresh() {
     } finally { refreshing = null; }
   })();
 }
-async function api(path, opts = {}, retry = true) {
+// Erreurs passagères (serveur surchargé, trop de connexions…) : on réessaie avec un délai croissant
+const TRANSIENT = /too many connections|timeout|timed out|rate limit|too many requests|temporar|try again|overloaded|unavailable/i;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function api(path, opts = {}, retry = true, attempt = 0) {
   if (!st.auth) throw new Error(t('Non connecté.'));
   if (st.auth.expires_at * 1000 < Date.now() + 60000) await refresh();
   let res;
   try {
     res = await fetch(base() + path, { ...opts, headers: { apikey: st.cfg.key, Authorization: `Bearer ${st.auth.access_token}`, ...(opts.headers || {}) } });
   } catch {
+    if (attempt < 2 && navigator.onLine !== false) { await sleep(1500 * (attempt + 1)); return api(path, opts, retry, attempt + 1); }
     throw new Error(navigator.onLine === false ? t('Hors ligne.') : t("Serveur injoignable. Si Mnemo n'a pas été utilisé depuis une semaine, le projet Supabase est en pause : réactive-le depuis supabase.com."));
   }
-  if (res.status === 401 && retry) { await refresh(); return api(path, opts, false); }
-  if (!res.ok) throw new Error(await errText(res));
+  if (res.status === 401 && retry) { await refresh(); return api(path, opts, false, attempt); }
+  if (!res.ok) {
+    const msg = await errText(res);
+    if (attempt < 4 && (res.status === 429 || res.status >= 500 || TRANSIENT.test(msg))) {
+      await sleep(1000 * 2 ** attempt + Math.random() * 400);
+      return api(path, opts, retry, attempt + 1);
+    }
+    throw new Error(msg);
+  }
   return res;
 }
 const uid = () => st.auth.user.id;
@@ -278,8 +289,10 @@ async function pull(from = st.lastSeq) {
 }
 
 // ---------- envoi des changements locaux ----------
-async function push() {
-  if (!st.dirty.size) return 0;
+const rowsDirty = () => [...st.dirty.keys()].some(k => !k.startsWith('media:'));
+const mediaDirty = () => [...st.dirty.keys()].filter(k => k.startsWith('media:')).length;
+async function pushRows() {
+  if (!rowsDirty()) return 0;
   const revMap = new Map(S.revlog.map(l => [l.id, l]));
   const entries = [...st.dirty.entries()].sort((a, b) => ORDER[a[0].split(':')[0]] - ORDER[b[0].split(':')[0]]);
   const rows = [], media = [];
@@ -308,6 +321,11 @@ async function push() {
     batch.push(r); size += len;
   }
   await flushBatch();
+  return sent;
+}
+// Médias envoyés un par un, sans bloquer la synchro des cartes en cas d'échec
+async function pushMedia() {
+  const media = [...st.dirty.entries()].filter(([key]) => key.startsWith('media:')).map(([key, ts]) => [key, key.slice(6), ts]);
   let k = 0;
   for (const [key, name, ts] of media) {
     k++;
@@ -323,8 +341,9 @@ async function push() {
     });
     if (st.dirty.get(key) === ts) st.dirty.delete(key);
     saveSoon();
+    await sleep(120);
   }
-  return sent + media.length;
+  return media.length;
 }
 
 async function downloadMedia() {
@@ -340,10 +359,11 @@ async function downloadMedia() {
         await DB.putMedia(name, new Blob([blob], { type: info.type || blob.type }), { silent: true });
       }
       st.pendingMedia.delete(name); saveSoon();
+      await sleep(80);
       if (k % 5 === 0) progress(t('Téléchargement des médias : {a} restants', { a: todo.length }));
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await worker();
 }
 
 async function maxSeq() {
@@ -385,7 +405,7 @@ async function merge() {
     S.notetypes.delete(nt.id); raw.del('notetypes', nt.id);
   }
   await markAll(pulled);
-  await push();
+  await pushRows();
 }
 async function replaceCloud() {
   progress(t('Remplacement du cloud…'));
@@ -402,16 +422,18 @@ async function replaceCloud() {
     last = rows[rows.length - 1].srv_seq;
   }
   await markAll();
-  await push();
+  await pushRows();
   st.lastSeq = await maxSeq();
 }
 async function firstSync() {
   const any = (await (await api(`/rest/v1/${TABLE}?select=id&deleted=eq.false&limit=1`)).json()).length > 0;
   if (!any) {
     progress(t('Premier envoi de la collection…'));
-    await markAll(); await push();
+    st.firstUpload = uid();
+    await markAll(); await pushRows();
     st.lastSeq = await maxSeq();
   } else if (!S.notes.size) await replaceLocal();
+  else if (st.firstUpload === uid()) await merge();
   else {
     const choice = sync.chooser ? await sync.chooser() : 'merge';
     if (!choice) { setStatus('idle', t('Première synchronisation en attente.')); return false; }
@@ -421,6 +443,22 @@ async function firstSync() {
   }
   st.initialDone = true;
   return true;
+}
+
+// ---------- médias (jamais bloquants) ----------
+let mediaRetryAt = 0, mediaError = '';
+async function mediaStep(force) {
+  if (!mediaDirty() && !st.pendingMedia.size) { mediaError = ''; return; }
+  if (!force && mediaError && Date.now() < mediaRetryAt) return;
+  let err = '';
+  try { await pushMedia(); } catch (e) { err = e.message || String(e); }
+  try { if (st.pendingMedia.size) await downloadMedia(); } catch (e) { err ||= e.message || String(e); }
+  mediaError = err;
+  if (err) { console.warn('media sync', err); mediaRetryAt = Date.now() + 10 * 60000; }
+}
+function mediaNote() {
+  const n = mediaDirty() + st.pendingMedia.size;
+  return mediaError && n ? t('Cartes synchronisées. {n} image(s) ou son(s) en attente, nouvel essai plus tard ({e}).', { n, e: mediaError }) : '';
 }
 
 // ---------- synchro complète ----------
@@ -434,12 +472,12 @@ export async function syncNow({ quiet = false } = {}) {
   try {
     if (!st.initialDone) { firstDone = await firstSync(); changed = Infinity; }
     if (firstDone) {
-      await push();
+      await pushRows();
       changed += await pull();
-      if (st.dirty.size) await push();
-      if (st.pendingMedia.size) await downloadMedia();
+      if (rowsDirty()) await pushRows();
       st.lastSync = Date.now();
-      setStatus('idle');
+      await mediaStep(!quiet);
+      setStatus('idle', mediaNote());
     }
   } catch (e) {
     console.error('sync', e);
@@ -457,8 +495,9 @@ export async function resetFrom(source) {
     if (source === 'cloud') await replaceLocal(); else await replaceCloud();
     st.initialDone = true;
     await pull();
-    if (st.pendingMedia.size) await downloadMedia();
-    st.lastSync = Date.now(); setStatus('idle');
+    st.lastSync = Date.now();
+    await mediaStep(true);
+    setStatus('idle', mediaNote());
   } catch (e) { setStatus('error', e.message || String(e)); }
   finally { st.busy = false; saveNow(); await DB.flush(); sync.onRemote?.(Infinity); }
 }

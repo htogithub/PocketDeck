@@ -1,7 +1,7 @@
 // Mnemo — service worker : fonctionne hors ligne.
 // Fichiers de l'app : réseau d'abord (mises à jour immédiates), cache en secours.
 // Bibliothèques et polices des CDN : cache d'abord (URL versionnées, donc immuables).
-const VERSION = 'mnemo-v1.2.0';
+const VERSION = 'mnemo-v1.2.1';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'ui.js', 'util.js', 'i18n.js', 'i18n-en.js', 'state.js', 'db.js', 'sched.js',
   'template.js', 'cardview.js', 'search.js', 'stats.js', 'importers.js', 'exporters.js', 'sync.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-192.png'];
 const CDN = ['https://cdn.jsdelivr.net/', 'https://fonts.googleapis.com/', 'https://fonts.gstatic.com/'];

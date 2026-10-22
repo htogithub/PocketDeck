@@ -692,5 +692,6 @@ export default {
  "Fusion avec le cloud…": "Merging with the cloud…",
  "Remplacement du cloud…": "Replacing the cloud…",
  "Premier envoi de la collection…": "Uploading collection for the first time…",
- "Première synchronisation en attente.": "First sync pending."
+ "Première synchronisation en attente.": "First sync pending.",
+ "Cartes synchronisées. {n} image(s) ou son(s) en attente, nouvel essai plus tard ({e}).": "Cards synced. {n} image(s) or audio file(s) pending, will retry later ({e})."
 };
