@@ -16,7 +16,7 @@ import * as EX from './exporters.js';
 import { go, header, iconBtn, sheet, menu, ask, confirmBox, deckSelect, deckOptions, seg, toggle, setRow, linkRow, section,
   cardStatus, templateName, cardInfo, noteEditor, closeAllSheets, sheetOpen } from './ui.js';
 
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 let cleanup = null, pendingSession = null, routeToken = 0;
 
 // ---------- thème ----------
@@ -1436,7 +1436,17 @@ async function boot() {
   for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault(), { passive: false });
   document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
   window.addEventListener('hashchange', route);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
+  // iOS (app sur l'écran d'accueil) peut garder une hauteur d'écran erronée au lancement :
+  // on force le recalcul de la barre du bas une fois la page affichée et à chaque changement de taille
+  const relayout = () => {
+    const tb = document.getElementById('tabbar'); if (!tb) return;
+    tb.style.display = 'none'; void tb.offsetHeight; tb.style.display = '';
+  };
+  for (const ms of [50, 400, 1200]) setTimeout(relayout, ms);
+  window.addEventListener('resize', relayout);
+  window.addEventListener('orientationchange', () => setTimeout(relayout, 300));
+  window.addEventListener('pageshow', relayout);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); else setTimeout(relayout, 100); });
   window.addEventListener('pagehide', () => flush());
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (S.settings.theme === 'system') applyTheme(); });
   route();
