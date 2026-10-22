@@ -15,7 +15,7 @@ import * as EX from './exporters.js';
 import { go, header, iconBtn, sheet, menu, ask, confirmBox, deckSelect, deckOptions, seg, toggle, setRow, linkRow, section,
   cardStatus, templateName, cardInfo, noteEditor, closeAllSheets, sheetOpen } from './ui.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 let cleanup = null, pendingSession = null, routeToken = 0;
 
 // ---------- thème ----------

@@ -618,5 +618,7 @@ export default {
  "Importer {n} fichier": "Import {n} file",
  "Importer {n} fichiers": "Import {n} files",
  "Aucun fichier importable.": "No importable files.",
- "Fichier {a} / {b} : {f}": "File {a} / {b}: {f}"
+ "Fichier {a} / {b} : {f}": "File {a} / {b}: {f}",
+ "Paquet importé": "Imported deck",
+ "Champ {n}": "Field {n}"
 };

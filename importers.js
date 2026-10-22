@@ -59,50 +59,74 @@ function ntFrom(id, name, type, flds, tmpls, css, sortf, mod) {
   return nt;
 }
 
+// Lecture tolérante : on lit toutes les colonnes présentes (SELECT *) et on complète celles qui manquent,
+// car certains générateurs d'.apkg produisent des tables incomplètes.
 export function readCollectionDb(db) {
-  const col = rowsOf(db, 'SELECT crt, models, decks FROM col')[0];
-  if (!col) throw new Error(t('Collection Anki vide ou illisible.'));
-  const crtDay = dayNumber(col.crt * 1000 + 12 * 3600e3);
-  const modern = rowsOf(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='notetypes'").length > 0;
+  const tables = new Set(rowsOf(db, "SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name));
+  const all = (tbl, order = '') => {
+    if (!tables.has(tbl)) return [];
+    try { return rowsOf(db, `SELECT * FROM "${tbl}"${order}`); } catch { return []; }
+  };
+  const parse = s => { try { return JSON.parse(s || '{}') || {}; } catch { return {}; } };
+  if (!tables.has('notes')) throw new Error(t('Collection Anki vide ou illisible.'));
+  const col = all('col')[0] || {};
+  const crt = Number(col.crt) > 0 ? Number(col.crt) : Math.floor(Date.now() / 1000);
+  const crtDay = dayNumber(crt * 1000 + 12 * 3600e3);
+  const modern = tables.has('notetypes');
   const notetypes = [], decks = [];
   const filtered = new Set();
   if (modern) {
-    const flds = rowsOf(db, 'SELECT ntid, ord, name FROM fields ORDER BY ntid, ord');
-    const tmpls = rowsOf(db, 'SELECT ntid, ord, name, config FROM templates ORDER BY ntid, ord');
-    for (const r of rowsOf(db, 'SELECT id, name, mtime_secs, config FROM notetypes')) {
+    const flds = all('fields', ' ORDER BY ntid, ord');
+    const tmpls = all('templates', ' ORDER BY ntid, ord');
+    for (const r of all('notetypes')) {
       const c = pbDecode(r.config);
       notetypes.push(ntFrom(r.id, r.name, Number(c[1]?.[0] ?? 0), flds.filter(f => f.ntid === r.id).map(f => f.name),
         tmpls.filter(x => x.ntid === r.id).map(x => { const tc = pbDecode(x.config); return { name: x.name, qfmt: pbStr(tc[1]?.[0]), afmt: pbStr(tc[2]?.[0]) }; }),
         pbStr(c[3]?.[0]), Number(c[2]?.[0] ?? 0), r.mtime_secs));
     }
-    for (const r of rowsOf(db, 'SELECT id, name, kind FROM decks')) {
-      const k = pbDecode(r.kind);
-      if (k[2]) { filtered.add(r.id); continue; }
-      decks.push({ id: r.id, name: String(r.name).replace(/\x1f/g, '::') });
-    }
-  } else {
-    const models = JSON.parse(col.models || '{}');
-    for (const m of Object.values(models)) {
-      const flds = (m.flds || []).slice().sort((a, b) => a.ord - b.ord).map(f => f.name);
-      const tm = (m.tmpls || []).slice().sort((a, b) => a.ord - b.ord);
-      notetypes.push(ntFrom(m.id, m.name, m.type, flds, tm, m.css, m.sortf, m.mod));
-    }
-    for (const d of Object.values(JSON.parse(col.decks || '{}'))) {
-      if (d.dyn) { filtered.add(+d.id); continue; }
-      decks.push({ id: +d.id, name: d.name });
+    for (const r of all('decks')) {
+      if (pbDecode(r.kind)[2]) { filtered.add(r.id); continue; }
+      decks.push({ id: r.id, name: String(r.name ?? '').replace(/\x1f/g, '::') || t('Paquet importé') });
     }
   }
-  const notes = rowsOf(db, 'SELECT id, guid, mid, mod, tags, flds FROM notes').map(n => ({
+  if (!notetypes.length) {
+    for (const m of Object.values(parse(col.models))) {
+      if (!m || typeof m !== 'object') continue;
+      const flds = (m.flds || []).slice().sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0)).map((f, i) => f.name || t('Champ {n}', { n: i + 1 }));
+      const tm = (m.tmpls || []).slice().sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0));
+      notetypes.push(ntFrom(m.id, m.name, m.type, flds, tm, m.css, m.sortf, m.mod));
+    }
+  }
+  if (!decks.length) {
+    for (const d of Object.values(parse(col.decks))) {
+      if (!d || typeof d !== 'object') continue;
+      if (d.dyn) { filtered.add(+d.id); continue; }
+      decks.push({ id: +d.id, name: d.name || t('Paquet importé') });
+    }
+  }
+  const notes = all('notes').map(n => ({
     id: n.id, guid: n.guid || guid(), mid: n.mid, flds: String(n.flds ?? '').split('\x1f'),
     tags: String(n.tags || '').trim().split(/\s+/).filter(Boolean), mod: (n.mod || 0) * 1000,
   }));
-  const revlog = rowsOf(db, 'SELECT id, cid, ease, ivl, lastIvl, factor, time, type FROM revlog');
+  // Notes dont le type est absent : on crée un type générique pour ne rien perdre
+  const known = new Set(notetypes.map(n => n.id));
+  const orphans = new Map();
+  for (const n of notes) if (!known.has(n.mid)) orphans.set(n.mid, Math.max(orphans.get(n.mid) || 1, n.flds.length));
+  for (const [mid, nf] of orphans) {
+    const names = Array.from({ length: nf }, (_, i) => t('Champ {n}', { n: i + 1 }));
+    const back = names.slice(1).map(x => `{{${x}}}`).join('<br>');
+    notetypes.push(ntFrom(mid, t('Type importé'), 0, names, [{ name: t('Carte {n}', { n: 1 }), qfmt: `{{${names[0]}}}`, afmt: `{{FrontSide}}\n\n<hr id=answer>\n\n${back}` }], '.card { font-family: var(--card-font); font-size: var(--card-size); text-align: var(--card-align); }', 0, 0));
+  }
+  const revlog = all('revlog').map(l => ({
+    id: l.id, cid: l.cid, ease: l.ease ?? l.button_chosen ?? l.button ?? null, ivl: l.ivl ?? 0, lastIvl: l.lastIvl ?? l.lastivl ?? l.last_interval ?? 0,
+    factor: l.factor ?? 0, time: l.time ?? l.taken_millis ?? 0, type: l.type ?? l.kind ?? 1,
+  })).filter(l => l.id != null && l.cid != null && l.ease != null);
   const lastRev = new Map();
   for (const l of revlog) if (l.ease >= 1 && (lastRev.get(l.cid) ?? 0) < l.id) lastRev.set(l.cid, l.id);
   const dp = defaultPreset();
-  const cards = rowsOf(db, 'SELECT id, nid, did, ord, mod, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data FROM cards').map(c => {
-    let did = c.did, due = c.due;
-    if (c.odid) { did = c.odid; due = c.odue; }
+  const cards = all('cards').filter(c => c.id != null && c.nid != null).map(c => {
+    let did = c.did ?? decks[0]?.id ?? 1, due = Number(c.due) || 0;
+    if (c.odid) { did = c.odid; due = Number(c.odue) || 0; }
     const type = [0, 1, 2, 3].includes(c.type) ? c.type : 0;
     const learnTs = (type === 1 || type === 3) && due > 1e9;
     const nd = type === 0 ? due : learnTs ? due * 1000 : crtDay + due;
@@ -111,11 +135,12 @@ export function readCollectionDb(db) {
     try { data = c.data ? JSON.parse(c.data) : {}; } catch {}
     const steps = type === 3 ? dp.relearnSteps : dp.learnSteps;
     const remaining = (c.left || 0) % 1000;
+    const ivl = Math.max(0, c.ivl || 0);
     return {
-      id: c.id, nid: c.nid, did, ord: c.ord, type, queue, due: nd, ivl: Math.max(0, c.ivl || 0), factor: c.factor || 0,
+      id: c.id, nid: c.nid, did, ord: c.ord || 0, type, queue, due: nd, ivl, factor: c.factor || 0,
       reps: c.reps || 0, lapses: c.lapses || 0, step: Math.max(0, Math.min(steps.length - 1, steps.length - remaining)),
       flags: (c.flags || 0) & 7, s: Number.isFinite(data.s) ? data.s : null, d: Number.isFinite(data.d) ? data.d : null,
-      lastRev: lastRev.get(c.id) ?? (type === 2 ? dayStart(nd - c.ivl) : null), mod: (c.mod || 0) * 1000,
+      lastRev: lastRev.get(c.id) ?? (type === 2 ? dayStart(nd - ivl) : null), mod: (c.mod || 0) * 1000,
     };
   });
   return { notetypes, decks, notes, cards, revlog, filtered };
@@ -134,6 +159,7 @@ export async function readApkg(file, progress = () => {}) {
   const db = new SQL.Database(bytes);
   let frag;
   try { frag = readCollectionDb(db); } finally { db.close(); }
+  frag.defaultDeckName = String(file?.name || '').replace(/\.[^.]+$/, '') || null;
   frag.media = await apkgMediaEntries(zip);
   frag.loadMedia = async (name, zipName) => {
     const f = zip.file(zipName); if (!f) return null;
@@ -175,11 +201,14 @@ export async function mergeFragment(frag, { keepSched = true, dup = 'update', pr
     S.notetypes.set(copy.id, copy); saveNotetype(copy); ntMap.set(nt.id, copy.id);
   }
   const dMap = new Map();
+  // On ne crée que les paquets réellement utilisés (et leurs parents) ; le paquet 1 d'Anki devient notre paquet par défaut
+  const used = new Set([...(frag.cards || []).map(c => c.did), ...frag.notes.map(n => n.did).filter(x => x != null)]);
   for (const d of frag.decks) {
-    const id = deckByName(d.name); dMap.set(d.id, id);
+    if (!used.has(d.id) && !d.folder) continue;
+    const id = +d.id === 1 && S.decks.has(1) ? 1 : deckByName(d.name); dMap.set(d.id, id);
     if (d.folder) { const x = S.decks.get(id); if (!x.folder) { x.folder = true; persist.put('decks', x); } }
   }
-  const fallbackDeck = frag.decks.length ? dMap.get(frag.decks[0].id) : (frag.defaultDeck ?? 1);
+  const fallbackDeck = frag.decks.length ? dMap.get(frag.decks[0].id) : frag.defaultDeckName ? deckByName(frag.defaultDeckName) : (frag.defaultDeck ?? 1);
   const deckFor = did => dMap.get(did) ?? fallbackDeck ?? 1;
   const byGuid = new Map(); for (const n of S.notes.values()) byGuid.set(n.guid, n);
   const cardsOf = new Map();
