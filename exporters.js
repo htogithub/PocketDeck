@@ -199,7 +199,7 @@ export function exportJson({ did = null, sched = true } = {}) {
   const ids = new Set(cards.map(c => c.id));
   const data = {
     format: 'mnemo', version: 1, kind: 'decks', exported: Date.now(),
-    notetypes, decks: decks.map(id => ({ id, name: S.decks.get(id).name, desc: S.decks.get(id).desc || '' })), notes,
+    notetypes, decks: decks.map(id => ({ id, name: S.decks.get(id).name, desc: S.decks.get(id).desc || '', folder: !!S.decks.get(id).folder })), notes,
     cards: sched ? cards : cards.map(c => ({ ...c, type: 0, queue: 0, ivl: 0, factor: 0, reps: 0, lapses: 0, step: 0, s: null, d: null, lastRev: null })),
     revlog: sched ? S.revlog.filter(l => ids.has(l.cid)) : [],
   };

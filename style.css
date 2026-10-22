@@ -32,6 +32,7 @@ html[data-mode="dark"] { --again: #F2555A; --hard: #E9A23F; --good: #3CC27F; --e
 
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--fg); }
+html { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 body {
   font: 400 16px/1.45 var(--ui-font); -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
   min-height: 100dvh; padding-top: var(--safe-t);
@@ -129,7 +130,15 @@ html[data-theme="amoled"] .seg button.on { background: var(--line-strong); }
 .deck-row { grid-template-columns: calc(var(--depth) * 18px + 28px) 1fr 140px; min-height: 56px; border-bottom: 1px solid var(--line); }
 .deck-row .twisty { justify-self: end; width: 28px; height: 28px; display: grid; place-items: center; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0; }
 .deck-row .twisty.collapsed .ic { transform: rotate(-90deg); }
-.deck-name { padding: 14px 8px 14px 2px; font-size: 17px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deck-name { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 14px 8px 14px 2px; font-size: 17px; font-weight: 500; }
+.deck-name > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deck-row.folder .deck-name { font-weight: 600; }
+.deck-row.folder .deck-name .ic { color: var(--accent); }
+.pick-list { display: grid; max-height: 50dvh; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r); }
+.pick-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px 11px calc(14px + var(--depth) * 16px); border-top: 1px solid var(--line); cursor: pointer; }
+.pick-row:first-child { border-top: 0; }
+.pick-row input { accent-color: var(--accent); width: 18px; height: 18px; margin: 0; flex: none; }
+.pick-row .ic { color: var(--accent); }
 .deck-counts { display: grid; grid-template-columns: 44px 44px 44px; justify-items: end; padding-right: 8px; }
 .n { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 15px; }
 .n.new { color: var(--new); } .n.learn { color: var(--learn); } .n.rev { color: var(--rev); }
@@ -151,7 +160,8 @@ html[data-theme="amoled"] .seg button.on { background: var(--line-strong); }
 .desc { color: var(--muted); font-size: 14px; margin-top: 24px; white-space: pre-line; }
 
 /* ---------- étude ---------- */
-body.studying #view { max-width: none; padding: 0; height: 100dvh; display: flex; flex-direction: column; }
+body.studying { overflow: hidden; }
+body.studying #view { position: fixed; inset: 0; max-width: none; height: auto; padding: var(--safe-t) 0 0; display: flex; flex-direction: column; overscroll-behavior: none; }
 @media (min-width: 960px) { body.studying #view { padding-left: 0; } }
 .study-top { padding: 4px 8px; flex: none; }
 .study-counts { flex: 1; display: flex; justify-content: center; gap: 18px; align-items: baseline; }
@@ -330,7 +340,10 @@ details.paste textarea { margin-top: 8px; font: 13px/1.5 var(--mono); }
 .panel > .set-sec { margin: 12px 0; }
 .preview-list { display: grid; gap: 1px; margin: 8px 0; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
 .pv { display: grid; gap: 2px; padding: 10px 12px; background: var(--surface); font-size: 14px; }
-.pv b { font-weight: 550; } .pv span { color: var(--muted); }
+.pv b { font-weight: 550; overflow-wrap: anywhere; } .pv span { color: var(--muted); }
+.pv.off b { color: var(--muted); }
+.error-text { color: var(--again) !important; }
+.busy p { white-space: pre-line; margin: 0; }
 .busy { display: flex; gap: 12px; align-items: center; padding: 20px 0; }
 .spinner { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -363,6 +376,11 @@ svg.heat { max-width: 340px; min-width: 300px; }
   padding: 11px 18px; border-radius: 14px; background: var(--fg); color: var(--bg); font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; text-align: center; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 body.studying #toast { bottom: calc(96px + var(--safe-b)); }
+
+/* Pas de zoom automatique sur les champs (iOS zoome sous 16 px) */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: 16px !important; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }

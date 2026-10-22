@@ -25,6 +25,11 @@ The interface is available in English and French (Settings → Language).
 - Accent color, interface font, card font (any Google Fonts family), card size, width and alignment
 - Option to adapt imported cards to the theme and font
 
+**Organizing**
+- Folders to group decks (nested folders supported), with combined counts and a *Study folder* button
+- Move decks between folders, add existing decks to a folder, delete a folder while keeping its decks
+- Import several files at once with shared options (one deck per text file, or a single destination)
+
 **Browse and stats**
 - Search with Anki syntax: `deck:`, `tag:`, `note:`, `is:due`, `flag:`, `added:`, `rated:`, `prop:ivl>=30`, field searches, `or`, negation, regex
 - Bulk actions: move, tag, suspend, flag, reset, delete, study selection
@@ -92,7 +97,7 @@ There is no build step. External libraries (KaTeX, JSZip, sql.js, fzstd) load fr
 - **iPhone / iPad**: open the site in Safari, tap Share → *Add to Home Screen*. The app then opens full screen and works offline.
 - **Android**: open it in Chrome and choose *Install app*.
 
-Installing it also makes the browser less likely to clear its storage. You can check the storage status in Settings → Data.
+Pinch and double-tap zoom are disabled so the app behaves like a native one. Installing it also makes the browser less likely to clear its storage. You can check the storage status in Settings → Data.
 
 ## Your data
 

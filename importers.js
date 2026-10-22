@@ -175,7 +175,10 @@ export async function mergeFragment(frag, { keepSched = true, dup = 'update', pr
     S.notetypes.set(copy.id, copy); saveNotetype(copy); ntMap.set(nt.id, copy.id);
   }
   const dMap = new Map();
-  for (const d of frag.decks) dMap.set(d.id, deckByName(d.name));
+  for (const d of frag.decks) {
+    const id = deckByName(d.name); dMap.set(d.id, id);
+    if (d.folder) { const x = S.decks.get(id); if (!x.folder) { x.folder = true; persist.put('decks', x); } }
+  }
   const fallbackDeck = frag.decks.length ? dMap.get(frag.decks[0].id) : (frag.defaultDeck ?? 1);
   const deckFor = did => dMap.get(did) ?? fallbackDeck ?? 1;
   const byGuid = new Map(); for (const n of S.notes.values()) byGuid.set(n.guid, n);

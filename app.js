@@ -1,5 +1,5 @@
 // Mnemo — application : démarrage, thème, navigation et écrans
-import { S, saveSettings, saveDeck, deckByName, renameDeck, deleteDeck, deckChildren, deckSubtree, topDecks, deckLeaf, presetOf,
+import { S, saveSettings, saveDeck, deckByName, renameDeck, deleteDeck, deckChildren, deckSubtree, topDecks, deckLeaf, presetOf, deckParent, deckAncestors, invalidateDecks,
   notetypeOf, noteCards, sortText, deleteNotes, addTags, removeTags, parseTags, saveCard, persist, defaultPreset, saveNotetype,
   notesOfType, genCards, updateNote, deleteCard, uniqueNotetypeName, builtinDef, BUILTIN_KEYS, localizeDefaults, DEFAULT_W, saveNote } from './state.js';
 import { h, ic, $, esc, toast, today, dayStart, fmtIvl, fmtDuration, truncate, hash32, saveFile, debounce, setRollover, newId, stripHtml, dayLabel } from './util.js';
@@ -15,7 +15,7 @@ import * as EX from './exporters.js';
 import { go, header, iconBtn, sheet, menu, ask, confirmBox, deckSelect, deckOptions, seg, toggle, setRow, linkRow, section,
   cardStatus, templateName, cardInfo, noteEditor, closeAllSheets, sheetOpen } from './ui.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 let cleanup = null, pendingSession = null, routeToken = 0;
 
 // ---------- thème ----------
@@ -91,50 +91,146 @@ function route() {
 }
 const rerender = () => route();
 
-// ---------- paquets ----------
+// ---------- paquets et dossiers ----------
+const isFolder = id => !!S.decks.get(id)?.folder;
+function pathLabel(name) { return name.split('::').join(' / '); }
+function folderTargets(excludeId = null) {
+  const banned = new Set(excludeId != null ? deckSubtree(excludeId) : []);
+  return [...S.decks.values()].filter(d => d.folder && !banned.has(d.id)).sort((a, b) => a.name.localeCompare(b.name, getLang()));
+}
+function uniqueDeckName(name) {
+  if (deckByName(name, false) == null) return name;
+  let i = 2; while (deckByName(`${name} (${i})`, false) != null) i++;
+  return `${name} (${i})`;
+}
+async function createDeck(parent = null, { folder = false, open = false } = {}) {
+  const p = parent != null ? S.decks.get(parent) : null;
+  const name = await ask(folder ? t('Nouveau dossier') : t('Nouveau paquet'), {
+    placeholder: folder ? t('Nom du dossier') : t('Nom du paquet'),
+    label: p ? t('Dans « {d} »', { d: pathLabel(p.name) }) : '', ok: t('Créer'),
+  });
+  if (!name) return null;
+  const full = (p ? p.name + '::' : '') + name.trim();
+  if (deckByName(full, false) != null) { toast(t('Un paquet porte déjà ce nom.')); return null; }
+  const id = deckByName(full);
+  if (folder) { const d = S.decks.get(id); d.folder = true; saveDeck(d); }
+  toast(folder ? t('Dossier créé') : t('Paquet créé'));
+  if (open) go('deck/' + id); else rerender();
+  return id;
+}
+function moveDeckInto(did, parentId) {
+  const leaf = deckLeaf(S.decks.get(did).name);
+  renameDeck(did, parentId == null ? leaf : S.decks.get(parentId).name + '::' + leaf);
+}
+function moveTo(did) {
+  const d = S.decks.get(did);
+  const cur = deckParent(did);
+  let target = cur;
+  const targets = folderTargets(did);
+  const sel = h('select', { class: 'select', onchange: e => { target = e.target.value === '' ? null : +e.target.value; } },
+    h('option', { value: '', selected: cur == null }, t('Aucun dossier (racine)')),
+    targets.map(f => h('option', { value: f.id, selected: f.id === cur }, pathLabel(f.name))));
+  const close = sheet(t('Déplacer « {d} »', { d: deckLeaf(d.name) }), h('div', { class: 'form' },
+    targets.length ? sel : h('p', { class: 'muted' }, t("Aucun dossier pour l'instant.")),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn', onclick: async () => {
+        close();
+        const fid = await createDeck(null, { folder: true });
+        if (fid == null) return;
+        try { moveDeckInto(did, fid); toast(t('Déplacé')); rerender(); } catch (e) { toast(e.message); }
+      } }, ic('plus', 16), t('Nouveau dossier')),
+      targets.length ? h('button', { class: 'btn primary', onclick: () => {
+        if (target === cur) return close();
+        try { moveDeckInto(did, target); close(); toast(t('Déplacé')); rerender(); } catch (e) { toast(e.message); }
+      } }, t('Déplacer')) : null)));
+}
+function deleteFolderOnly(did) {
+  const parent = deckParent(did);
+  const prefix = parent != null ? S.decks.get(parent).name + '::' : '';
+  for (const ch of deckChildren(did).slice()) renameDeck(ch, uniqueDeckName(prefix + deckLeaf(S.decks.get(ch).name)));
+  for (const c of S.cards.values()) if (c.did === did) { c.did = parent ?? 1; saveCard(c); }
+  S.decks.delete(did); persist.del('decks', did); invalidateDecks();
+}
 function deckActions(did) {
   const d = S.decks.get(did);
+  const folder = !!d.folder;
+  const leaf = deckLeaf(d.name);
+  const count = () => { const ids = new Set(deckSubtree(did)); let n = 0; for (const c of S.cards.values()) if (ids.has(c.did)) n++; return n; };
   return [
     { label: t('Renommer'), icon: 'edit', onclick: async () => {
-      const name = await ask(t('Renommer le paquet'), { value: d.name, label: t('Utilisez « :: » pour créer un sous-paquet, par ex. Physique::Optique') });
-      if (!name) return;
-      try { renameDeck(did, name); rerender(); } catch (e) { toast(e.message); }
+      const name = await ask(folder ? t('Renommer le dossier') : t('Renommer le paquet'), { value: leaf });
+      if (!name || name === leaf) return;
+      const i = d.name.lastIndexOf('::');
+      try { renameDeck(did, name.includes('::') ? name : (i > 0 ? d.name.slice(0, i + 2) : '') + name); rerender(); } catch (e) { toast(e.message); }
     } },
-    { label: t('Options du paquet'), icon: 'settings', onclick: () => go(`preset/${d.conf || 1}?deck=${did}`) },
+    { label: t('Déplacer vers un dossier'), icon: 'folder', onclick: () => moveTo(did) },
+    folder ? { label: t('Ajouter des paquets'), icon: 'plus', onclick: () => addDecksToFolder(did) } : null,
+    !folder ? { label: t('Options du paquet'), icon: 'settings', onclick: () => go(`preset/${d.conf || 1}?deck=${did}`) } : null,
     { label: t('Exporter'), icon: 'download', onclick: () => go(`export?deck=${did}`) },
     { label: t('Statistiques'), icon: 'stats', onclick: () => go(`stats?deck=${did}`) },
-    did !== 1 ? { label: t('Supprimer'), icon: 'close', danger: true, onclick: async () => {
-      const n = [...S.cards.values()].filter(c => new Set(deckSubtree(did)).has(c.did)).length;
-      if (await confirmBox(tn(n, 'Supprimer « {d} » et sa carte ? Cette action est définitive.', 'Supprimer « {d} » et ses {n} cartes ? Cette action est définitive.', { d: d.name }), { danger: true, ok: t('Supprimer') })) {
-        deleteDeck(did); toast(t('Paquet supprimé')); go('decks');
+    folder ? { label: t('Supprimer le dossier (garder les paquets)'), icon: 'close', danger: true, onclick: async () => {
+      if (!await confirmBox(t("Supprimer le dossier « {d} » ? Les paquets qu'il contient remontent d'un niveau.", { d: leaf }), { danger: true, ok: t('Supprimer') })) return;
+      try { deleteFolderOnly(did); toast(t('Dossier supprimé')); go('decks'); } catch (e) { toast(e.message); }
+    } } : null,
+    did !== 1 ? { label: folder ? t('Supprimer le dossier et son contenu') : t('Supprimer'), icon: 'close', danger: true, onclick: async () => {
+      const n = count();
+      if (await confirmBox(tn(n, 'Supprimer « {d} » et sa carte ? Cette action est définitive.', 'Supprimer « {d} » et ses {n} cartes ? Cette action est définitive.', { d: leaf }), { danger: true, ok: t('Supprimer') })) {
+        deleteDeck(did); toast(folder ? t('Dossier supprimé') : t('Paquet supprimé')); go('decks');
       }
     } } : null,
   ];
 }
-async function createDeck(parent = null) {
-  const base = parent ? S.decks.get(parent).name + '::' : '';
-  const name = await ask(t('Nouveau paquet'), { value: base, placeholder: t('Nom du paquet'), label: t('Utilisez « :: » pour créer un sous-paquet, par ex. Physique::Optique') });
-  if (!name) return;
-  const id = deckByName(name);
-  toast(t('Paquet créé'));
-  rerender();
-  return id;
+function addDecksToFolder(fid) {
+  const f = S.decks.get(fid);
+  const banned = new Set([...deckSubtree(fid), ...deckAncestors(fid)]);
+  const cands = [...S.decks.values()].filter(d => !banned.has(d.id)).sort((a, b) => a.name.localeCompare(b.name, getLang()));
+  const chosen = new Set();
+  const list = h('div', { class: 'pick-list' }, cands.map(d => h('label', { class: 'pick-row', style: `--depth:${d.name.split('::').length - 1}` },
+    h('input', { type: 'checkbox', onchange: e => { e.target.checked ? chosen.add(d.id) : chosen.delete(d.id); } }),
+    d.folder ? ic('folder', 18) : null, h('span', null, deckLeaf(d.name)))));
+  const close = sheet(t('Ajouter au dossier « {d} »', { d: deckLeaf(f.name) }), h('div', { class: 'form' },
+    cands.length ? list : h('p', { class: 'muted' }, t('Aucun autre paquet à déplacer.')),
+    h('div', { class: 'actions' }, cands.length ? h('button', { class: 'btn primary', onclick: () => {
+      const ids = [...chosen].filter(id => !deckAncestors(id).some(a => chosen.has(a)));
+      let moved = 0;
+      for (const id of ids) { try { moveDeckInto(id, fid); moved++; } catch (e) { toast(e.message); } }
+      close(); if (moved) toast(tn(moved, '{n} paquet déplacé', '{n} paquets déplacés')); rerender();
+    } }, t('Déplacer')) : null)));
+}
+
+function deckListEl(ids, counts, { hideEmptyDefault = false } = {}) {
+  const hasCards = new Set([...S.cards.values()].map(c => c.did));
+  const subHasCards = id => deckSubtree(id).some(x => hasCards.has(x));
+  const list = h('div', { class: 'deck-list', role: 'list' },
+    h('div', { class: 'deck-head', 'aria-hidden': 'true' }, h('span'), h('span', { class: 'n new' }, t('Nouv.')), h('span', { class: 'n learn' }, t('Appr.')), h('span', { class: 'n rev' }, t('À rev.'))));
+  const num = (n, cls) => h('span', { class: `n ${cls}${n ? '' : ' zero'}` }, n);
+  const addRow = (id, depth) => {
+    const d = S.decks.get(id), ch = deckChildren(id), c = counts.get(id);
+    if (hideEmptyDefault && id === 1 && !ch.length && S.decks.size > 1 && !subHasCards(1)) return;
+    list.append(h('div', { class: 'deck-row' + (d.folder ? ' folder' : ''), role: 'listitem', style: `--depth:${depth}` },
+      ch.length ? h('button', { class: 'twisty' + (d.collapsed ? ' collapsed' : ''), 'aria-label': d.collapsed ? t('Déplier') : t('Replier'), 'aria-expanded': String(!d.collapsed),
+        onclick: () => { d.collapsed = !d.collapsed; saveDeck(d); rerender(); } }, ic('caret', 16)) : h('span', { class: 'twisty' }),
+      h('a', { class: 'deck-name', href: '#/deck/' + id }, d.folder ? ic('folder', 19) : null, h('span', null, deckLeaf(d.name))),
+      h('a', { class: 'deck-counts', href: '#/deck/' + id, tabindex: '-1' }, num(c.new, 'new'), num(c.learn, 'learn'), num(c.rev, 'rev'))));
+    if (!d.collapsed) for (const k of ch) addRow(k, depth + 1);
+  };
+  for (const id of ids) addRow(id, 0);
+  return list;
 }
 
 function viewDecks(el) {
   const counts = deckCounts();
-  const hasCards = new Set([...S.cards.values()].map(c => c.did));
-  const subHasCards = id => deckSubtree(id).some(x => hasCards.has(x));
-  el.append(header({ title: 'Mnemo', cls: 'brand', actions: [
+  el.append(header({ title: 'PocketDeck', cls: 'brand', actions: [
     iconBtn('upload', t('Importer'), () => go('import')),
     iconBtn('more', t('Plus'), () => menu(t('Collection'), [
       { label: t('Créer un paquet'), icon: 'plus', onclick: () => createDeck() },
-      { label: t('Importer un fichier'), icon: 'upload', onclick: () => go('import') },
+      { label: t('Créer un dossier'), icon: 'folder', onclick: () => createDeck(null, { folder: true }) },
+      { label: t('Importer des fichiers'), icon: 'upload', onclick: () => go('import') },
       { label: t('Exporter'), icon: 'download', onclick: () => go('export') },
       { label: t('Sauvegarder la collection'), icon: 'download', onclick: () => go('export?format=backup') },
     ])),
   ] }));
-  if (!S.cards.size) {
+  if (!S.cards.size && S.decks.size <= 1) {
     el.append(h('div', { class: 'empty' },
       h('h2', null, t('Votre collection est vide')),
       h('p', null, t('Ajoutez une première note ou importez un paquet Anki (.apkg), un CSV, un fichier Markdown ou un QCM au format GIFT.')),
@@ -144,44 +240,45 @@ function viewDecks(el) {
   const tops = topDecks();
   let due = 0; for (const id of tops) { const c = counts.get(id); due += c.new + c.learn + c.rev; }
   el.append(h('p', { class: 'summary' }, due ? tn(due, "{n} carte à étudier aujourd'hui", "{n} cartes à étudier aujourd'hui") : t("Tout est à jour pour aujourd'hui.")));
-  const list = h('div', { class: 'deck-list', role: 'list' },
-    h('div', { class: 'deck-head', 'aria-hidden': 'true' }, h('span'), h('span', { class: 'n new' }, t('Nouv.')), h('span', { class: 'n learn' }, t('Appr.')), h('span', { class: 'n rev' }, t('À rev.'))));
-  const num = (n, cls) => h('span', { class: `n ${cls}${n ? '' : ' zero'}` }, n);
-  const addRow = (id, depth) => {
-    const d = S.decks.get(id), ch = deckChildren(id), c = counts.get(id);
-    if (id === 1 && !ch.length && S.decks.size > 1 && !subHasCards(1)) return;
-    list.append(h('div', { class: 'deck-row', role: 'listitem', style: `--depth:${depth}` },
-      ch.length ? h('button', { class: 'twisty' + (d.collapsed ? ' collapsed' : ''), 'aria-label': d.collapsed ? t('Déplier') : t('Replier'), 'aria-expanded': String(!d.collapsed),
-        onclick: () => { d.collapsed = !d.collapsed; saveDeck(d); rerender(); } }, ic('caret', 16)) : h('span', { class: 'twisty' }),
-      h('a', { class: 'deck-name', href: '#/deck/' + id }, deckLeaf(d.name)),
-      h('a', { class: 'deck-counts', href: '#/deck/' + id, tabindex: '-1' }, num(c.new, 'new'), num(c.learn, 'learn'), num(c.rev, 'rev'))));
-    if (!d.collapsed) for (const k of ch) addRow(k, depth + 1);
-  };
-  for (const id of tops) addRow(id, 0);
-  el.append(list, h('div', { class: 'actions center' }, h('button', { class: 'btn ghost', onclick: () => createDeck() }, ic('plus', 18), t('Créer un paquet'))));
+  el.append(deckListEl(tops, counts, { hideEmptyDefault: true }), h('div', { class: 'actions center' },
+    h('button', { class: 'btn ghost', onclick: () => createDeck() }, ic('plus', 18), t('Créer un paquet')),
+    h('button', { class: 'btn ghost', onclick: () => createDeck(null, { folder: true }) }, ic('folder', 18), t('Créer un dossier'))));
 }
 
 function viewDeck(el, id) {
   const did = +id, d = S.decks.get(did);
   if (!d) return go('decks');
-  S.settings.lastDeck = did; saveSettings();
-  const c = deckCounts().get(did);
+  const counts = deckCounts();
+  const c = counts.get(did);
   const total = c.new + c.learn + c.rev;
   const path = d.name.split('::');
-  el.append(header({ title: path[path.length - 1], back: 'decks', actions: [iconBtn('more', t('Actions du paquet'), () => menu(d.name, deckActions(did)))] }));
+  const parent = deckParent(did);
+  el.append(header({ title: path[path.length - 1], back: parent != null && isFolder(parent) ? 'deck/' + parent : 'decks',
+    actions: [iconBtn('more', d.folder ? t('Actions du dossier') : t('Actions du paquet'), () => menu(pathLabel(d.name), deckActions(did)))] }));
+  if (!d.folder) { S.settings.lastDeck = did; saveSettings(); }
   const box = h('div', { class: 'deck-hero' },
     path.length > 1 ? h('p', { class: 'crumbs' }, path.slice(0, -1).join(' / ')) : null,
     h('div', { class: 'big-counts' },
       h('div', { class: 'new' }, h('b', null, c.new), h('span', null, t('Nouvelles'))),
       h('div', { class: 'learn' }, h('b', null, c.learn), h('span', null, t('Apprentissage'))),
       h('div', { class: 'rev' }, h('b', null, c.rev), h('span', null, t('À revoir')))));
-  if (total) box.append(h('button', { class: 'btn primary xl', onclick: () => { pendingSession = null; go('study/' + did); } }, t('Étudier')));
+  if (total) box.append(h('button', { class: 'btn primary xl', onclick: () => { pendingSession = null; go('study/' + did); } }, d.folder ? t('Étudier le dossier') : t('Étudier')));
   else {
     const ids = new Set(deckSubtree(did)); let next = Infinity;
     for (const k of S.cards.values()) if (ids.has(k.did) && (k.queue === 2 || k.queue === 3)) next = Math.min(next, k.due);
     const days = next - today();
     box.append(h('p', { class: 'done-note' }, t("Rien à étudier pour l'instant."), ' ',
       Number.isFinite(next) ? (days <= 1 ? t('Prochaines révisions demain.') : t('Prochaines révisions dans {n}.', { n: fmtIvl(days) })) : ''));
+  }
+  if (d.folder) {
+    const kids = deckChildren(did);
+    el.append(box, kids.length ? deckListEl(kids, counts) : h('p', { class: 'muted pad' }, t('Ce dossier est vide.')),
+      h('div', { class: 'quick' },
+        h('button', { class: 'btn', onclick: () => createDeck(did) }, ic('plus', 18), t('Nouveau paquet ici')),
+        h('button', { class: 'btn', onclick: () => createDeck(did, { folder: true }) }, ic('folder', 18), t('Nouveau sous-dossier')),
+        h('button', { class: 'btn', onclick: () => addDecksToFolder(did) }, t('Ajouter des paquets')),
+        total ? h('button', { class: 'btn', onclick: () => customStudy(did) }, t('Étude personnalisée')) : null));
+    return;
   }
   box.append(h('div', { class: 'quick' },
     h('button', { class: 'btn', onclick: () => customStudy(did) }, t('Étude personnalisée')),
@@ -620,7 +717,7 @@ function viewStats(el, _, params) {
   let did = params.get('deck') ? +params.get('deck') : null;
   const body = h('div', { class: 'stats' });
   const draw = () => { body.innerHTML = statsHtml(did); };
-  el.append(header({ title: t('Statistiques') }), h('div', { class: 'stats-top' }, deckSelect(did, v => { did = v; draw(); }, { all: true })), body);
+  el.append(header({ title: t('Statistiques') }), h('div', { class: 'stats-top' }, deckSelect(did, v => { did = v; draw(); }, { all: true, folders: true })), body);
   draw();
 }
 
@@ -928,15 +1025,29 @@ function summary(res) {
   if (res.media) parts.push(tn(res.media, '{n} média', '{n} médias'));
   return parts.join(', ') + '.';
 }
+function looksHeader(r) { return !!r && r.every(c => c.length < 40 && !/<|\{\{/.test(c)) && r.some(c => /^(front|back|recto|verso|question|answer|réponse|reponse|term|definition|choix|choices|options|tags|deck|explication|explanation|affirmation|statement|q|a|r)$/i.test(c.trim())); }
+// Import de lignes sans intervention : type de note et correspondance devinés
+function autoImportRows(a, { did, tags = [], dup = 'update' }) {
+  if (a.notetypeCol >= 0) return IM.importAnkiText(a, { did, dup, tags });
+  const hasHeader = !!a.header || looksHeader(a.rows[0]);
+  const head = hasHeader ? (a.header || a.rows[0]) : null;
+  const rows = hasHeader && !a.header ? a.rows.slice(1) : a.rows;
+  const nt = (a.notetypeName && [...S.notetypes.values()].find(x => x.name === a.notetypeName)) || IM.guessNotetype(head) || IM.findBuiltin('basic') || [...S.notetypes.values()][0];
+  const g = IM.guessMapping(head, nt, Math.max(1, ...a.rows.slice(0, 20).map(r => r.length)));
+  return IM.importRows(rows, { mid: nt.id, did, map: g.map, tagsCol: g.tagsCol >= 0 ? g.tagsCol : (a.tagsCol ?? -1), deckCol: g.deckCol >= 0 ? g.deckCol : (a.deckCol ?? -1),
+    guidCol: a.guidCol ?? -1, html: a.html, tags, dup });
+}
+
 function viewImport(el) {
   const out = h('div', { class: 'import-out' });
-  const file = h('input', { type: 'file', hidden: true, accept: '.apkg,.colpkg,.csv,.tsv,.txt,.json,.md,.markdown,.html,.htm,.gift,.zip', onchange: e => { if (e.target.files[0]) handleFile(e.target.files[0]); e.target.value = ''; } });
+  const pick = list => { const fs = [...(list || [])]; if (fs.length === 1) handleFile(fs[0]); else if (fs.length > 1) handleMany(fs); };
+  const file = h('input', { type: 'file', hidden: true, multiple: true, accept: '.apkg,.colpkg,.csv,.tsv,.txt,.json,.md,.markdown,.html,.htm,.gift,.zip', onchange: e => { pick(e.target.files); e.target.value = ''; } });
   const paste = h('textarea', { class: 'input', rows: 6, placeholder: t('Collez ici du CSV/TSV, du Markdown (Q: … / R: …, recto :: verso), du GIFT ou de l\'Aiken.') });
-  const drop = h('button', { class: 'dropzone', onclick: () => file.click() }, ic('upload', 28), h('b', null, t('Choisir un fichier')),
+  const drop = h('button', { class: 'dropzone', onclick: () => file.click() }, ic('upload', 28), h('b', null, t('Choisir un ou plusieurs fichiers')),
     h('span', null, '.apkg  .colpkg  .csv  .tsv  .txt  .json  .md  .html  .gift  .zip'));
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); pick(e.dataTransfer.files); });
   el.append(header({ title: t('Importer'), back: 'decks' }), drop, file,
     h('details', { class: 'paste' }, h('summary', null, t('Ou coller du texte')), paste,
       h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => { if (paste.value.trim()) handleDetected(() => IM.detectText(paste.value.trim()), t('Texte collé')); } }, t('Analyser')))),
@@ -951,6 +1062,70 @@ function viewImport(el) {
   const fail = e => { console.error(e); out.replaceChildren(h('p', { class: 'error' }, e.message || String(e))); };
 
   async function handleFile(f) { handleDetected(() => IM.detectFile(f), f.name, f); }
+
+  // Import groupé : plusieurs fichiers d'un coup, avec des réglages communs
+  async function handleMany(files) {
+    busy(t('Analyse de {n} fichiers…', { n: files.length }));
+    const items = [];
+    for (const f of files) {
+      progress.textContent = t('Analyse de « {f} »…', { f: f.name });
+      try { items.push({ f, det: await IM.detectFile(f) }); } catch (e) { items.push({ f, err: e.message || String(e) }); }
+    }
+    const usable = items.filter(it => it.det && !it.det.kind.startsWith('backup'));
+    const hasAnki = usable.some(it => ['apkg', 'mnemo'].includes(it.det.kind));
+    const hasText = usable.some(it => ['simple', 'rows'].includes(it.det.kind));
+    const describe = it => {
+      if (it.err) return it.err;
+      const d = it.det;
+      if (d.kind === 'apkg') return t('Paquet Anki');
+      if (d.kind === 'mnemo') return t('JSON Mnemo');
+      if (d.kind === 'crowdanki') return 'CrowdAnki';
+      if (d.kind === 'simple') return `${d.source} — ${tn(d.notes.length, '{n} note', '{n} notes')}`;
+      if (d.kind === 'rows') return `${d.source} — ${tn(d.rows.length, '{n} ligne', '{n} lignes')}`;
+      return t('Sauvegarde : à restaurer seule');
+    };
+    let keep = true, dup = 'update', target = null;
+    const tags = h('input', { class: 'input', placeholder: t('étiquettes à ajouter (facultatif)') });
+    out.replaceChildren(h('div', { class: 'panel' },
+      h('h2', null, tn(files.length, '{n} fichier', '{n} fichiers')),
+      h('div', { class: 'preview-list' }, items.map(it => h('div', { class: 'pv' + (it.err || !usable.includes(it) ? ' off' : '') }, h('b', null, it.f.name), h('span', null, describe(it))))),
+      hasAnki ? setRow(t('Conserver la planification'), toggle(keep, v => { keep = v; }), t('Désactivé : toutes les cartes repartent comme nouvelles.')) : null,
+      hasText ? setRow(t('Destination des fichiers texte'), deckSelect(null, v => { target = v; }, { all: true, allLabel: t('Un paquet par fichier (nom du fichier)') })) : null,
+      hasText ? setRow(t('Étiquettes'), tags) : null,
+      setRow(t('Notes déjà présentes'), seg([['update', t('Mettre à jour')], ['skip', t('Ignorer')], ['new', t('Dupliquer')]], dup, v => { dup = v; }, { small: true })),
+      h('div', { class: 'actions' }, usable.length ? h('button', { class: 'btn primary', onclick: run }, tn(usable.length, 'Importer {n} fichier', 'Importer {n} fichiers'))
+        : h('p', { class: 'error' }, t('Aucun fichier importable.')))));
+    async function run() {
+      busy(t('Importation…'));
+      const total = { notesAdded: 0, notesUpdated: 0, notesSkipped: 0, cardsAdded: 0, empty: 0, media: 0 };
+      const report = [];
+      const rowDup = dup === 'new' ? 'allow' : dup;
+      for (const [i, it] of usable.entries()) {
+        const step = t('Fichier {a} / {b} : {f}', { a: i + 1, b: usable.length, f: it.f.name });
+        progress.textContent = step;
+        const sub = m => { progress.textContent = `${step}\n${m}`; };
+        try {
+          const d = it.det;
+          const base = it.f.name.replace(/\.[^.]+$/, '').replace(/::/g, ' ').trim() || t('Sans nom');
+          const deckFor = () => target ?? (d.deckName ? deckByName(d.deckName) : deckByName(base));
+          let res;
+          if (d.kind === 'apkg') res = await IM.mergeFragment(await IM.readApkg(it.f, sub), { keepSched: keep, dup, progress: sub });
+          else if (d.kind === 'mnemo') res = await IM.mergeFragment(IM.mnemoToFrag(d.data), { keepSched: keep, dup, progress: sub });
+          else if (d.kind === 'crowdanki') res = await IM.mergeFragment(IM.crowdAnkiToFrag(d.data, d.zip || null), { dup, progress: sub });
+          else if (d.kind === 'simple') res = IM.importSimple(d.notes, { did: deckFor(), tags: parseTags(tags.value), dup: rowDup });
+          else res = autoImportRows(d, { did: deckFor(), tags: parseTags(tags.value), dup: rowDup });
+          for (const k in total) total[k] += res[k] || 0;
+          report.push(h('div', { class: 'pv' }, h('b', null, it.f.name), h('span', null, summary(res))));
+        } catch (e) {
+          console.error(e);
+          report.push(h('div', { class: 'pv off' }, h('b', null, it.f.name), h('span', { class: 'error-text' }, e.message || String(e))));
+        }
+        await new Promise(r => setTimeout(r));
+      }
+      await flush();
+      done(total, h('div', { class: 'preview-list' }, report));
+    }
+  }
   async function handleDetected(detect, name, f = null) {
     busy(t('Analyse de « {f} »…', { f: name }));
     let det;
@@ -1021,7 +1196,6 @@ function viewImport(el) {
     let html = a.html, dup = 'update', map, tagsCol = a.tagsCol ?? -1, deckCol = a.deckCol ?? -1;
     const tags = h('input', { class: 'input', placeholder: t('étiquettes à ajouter (facultatif)'), value: (a.tags || []).join(' ') });
     const panel = h('div', { class: 'panel' });
-    function looksHeader(r) { return !!r && r.every(c => c.length < 40 && !/<|\{\{/.test(c)) && r.some(c => /^(front|back|recto|verso|question|answer|réponse|reponse|term|definition|choix|choices|options|tags|deck|explication|explanation|affirmation|statement|q|a|r)$/i.test(c.trim())); }
     const header_ = () => hasHeader ? (a.header || a.rows[0]) : null;
     const dataRows = () => hasHeader && !a.header ? a.rows.slice(1) : a.rows;
     const remap = () => { const g = IM.guessMapping(header_(), nt, Math.max(...a.rows.slice(0, 20).map(r => r.length))); map = g.map; if (g.tagsCol >= 0) tagsCol = g.tagsCol; if (g.deckCol >= 0) deckCol = g.deckCol; };
@@ -1087,7 +1261,7 @@ function viewExport(el, _, params) {
   ];
   const opts = h('div');
   const drawOpts = () => opts.replaceChildren(
-    format !== 'backup' ? setRow(t('Paquet'), deckSelect(did, v => { did = v; }, { all: true })) : null,
+    format !== 'backup' ? setRow(t('Paquet'), deckSelect(did, v => { did = v; }, { all: true, folders: true })) : null,
     format === 'apkg' || format === 'json' ? setRow(t('Inclure la planification'), toggle(sched, v => { sched = v; }), t('Intervalles et historique des révisions.')) : null,
     format === 'apkg' ? setRow(t('Inclure les médias'), toggle(media, v => { media = v; })) : null);
   el.append(header({ title: t('Exporter'), back: did ? 'deck/' + did : 'decks' }),
@@ -1125,6 +1299,9 @@ async function boot() {
   applyTheme();
   buildTabbar();
   unburyIfNewDay();
+  // Pas de zoom : Safari ignore user-scalable=no, on bloque donc les gestes de pincement
+  for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault(), { passive: false });
+  document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
   window.addEventListener('hashchange', route);
   document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
   window.addEventListener('pagehide', () => flush());

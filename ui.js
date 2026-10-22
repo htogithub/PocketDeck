@@ -75,10 +75,10 @@ export function confirmBox(message, { ok = t('Confirmer'), danger = false, title
 }
 
 // ---------- contrôles ----------
-export function deckOptions(selected, { all = false, allLabel = t('Toute la collection') } = {}) {
+export function deckOptions(selected, { all = false, allLabel = t('Toute la collection'), folders = false } = {}) {
   const out = [];
   if (all) out.push(h('option', { value: '', selected: selected == null }, allLabel));
-  const walk = ids => { for (const id of ids) { const d = S.decks.get(id); out.push(h('option', { value: id, selected: id === selected }, '\u2003'.repeat(deckDepth(d.name)) + deckLeaf(d.name))); walk(deckChildren(id)); } };
+  const walk = ids => { for (const id of ids) { const d = S.decks.get(id); out.push(h('option', { value: id, selected: id === selected, disabled: !!d.folder && !folders }, '\u2003'.repeat(deckDepth(d.name)) + (d.folder ? '▸ ' : '') + deckLeaf(d.name))); walk(deckChildren(id)); } };
   walk(topDecks());
   return out;
 }
@@ -193,7 +193,7 @@ const maxCloze = vals => Math.max(0, ...vals.flatMap(v => [...String(v).matchAll
 export function noteEditor({ note = null, onSaved = null, inSheet = false } = {}) {
   const editing = !!note;
   let mid = editing ? note.mid : (S.notetypes.has(S.settings.lastNotetype) ? S.settings.lastNotetype : [...S.notetypes.keys()][0]);
-  let did = editing ? (noteCards(note.id)[0]?.did ?? 1) : (S.decks.has(S.settings.lastDeck) ? S.settings.lastDeck : 1);
+  let did = editing ? (noteCards(note.id)[0]?.did ?? 1) : (S.decks.has(S.settings.lastDeck) && !S.decks.get(S.settings.lastDeck).folder ? S.settings.lastDeck : 1);
   let values = editing ? note.flds.slice() : [];
   let htmlMode = false, active = null, savedRange = null;
   let getters = [];

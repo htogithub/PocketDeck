@@ -323,7 +323,7 @@ function gather(rootDid, kind, day, idx) {
   const out = [];
   const rec = (did, parentRem) => {
     const p = presetOf(did);
-    const lim = (kind === 'new' ? p.newPerDay : p.revPerDay) - studiedToday(did, kind);
+    const lim = S.decks.get(did)?.folder ? Infinity : (kind === 'new' ? p.newPerDay : p.revPerDay) - studiedToday(did, kind);
     const rem = Math.max(0, Math.min(parentRem, lim));
     let taken = 0;
     const own = idx.get(did)?.[kind] || [];
