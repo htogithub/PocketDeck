@@ -67,6 +67,7 @@ export async function loadAll() {
     S.settings = { ...structuredClone(DEFAULT_SETTINGS), ...(kvm.settings || {}) };
     S.settings.gestures = { ...DEFAULT_SETTINGS.gestures, ...(kvm.settings?.gestures || {}) };
     S.meta = { nextPos: 1, ...(kvm.meta || {}) };
+    S.kv = kvm;
     if (!S.presets.size) { const p = defaultPreset(); S.presets.set(1, p); persist.put('presets', p); }
     if (!S.decks.has(1)) { const d = { id: 1, name: t('Par défaut'), conf: 1, desc: '', collapsed: false, mod: Date.now() }; S.decks.set(1, d); persist.put('decks', d); }
     for (const x of decks) bumpIdFloor(x.id);
@@ -89,20 +90,33 @@ export async function wipeAll() {
 
 // ---------- médias ----------
 const urlCache = new Map();
-export function putMedia(name, blob) {
+// La synchro s'abonne ici pour savoir quels médias envoyer
+export const mediaHooks = { put: null };
+export function putMedia(name, blob, { silent = false } = {}) {
+  const u = urlCache.get(name); if (u) URL.revokeObjectURL(u);
   urlCache.delete(name);
   return new Promise((res, rej) => {
     const tx = db.transaction('media', 'readwrite');
     tx.objectStore('media').put({ name, blob });
-    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    tx.oncomplete = () => { if (!silent) mediaHooks.put?.([name]); res(); }; tx.onerror = () => rej(tx.error);
   });
 }
-export function putMediaMany(list) {
+export function putMediaMany(list, { silent = false } = {}) {
   return new Promise((res, rej) => {
     const tx = db.transaction('media', 'readwrite');
     for (const { name, blob } of list) { urlCache.delete(name); tx.objectStore('media').put({ name, blob }); }
-    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    tx.oncomplete = () => { if (!silent) mediaHooks.put?.(list.map(x => x.name)); res(); }; tx.onerror = () => rej(tx.error);
   });
+}
+// Vide les données de collection (pas les réglages ni les médias)
+export async function clearCollectionStores() {
+  await flush();
+  const stores = ['notetypes', 'decks', 'presets', 'notes', 'cards', 'revlog'];
+  const tx = db.transaction(stores, 'readwrite');
+  for (const s of stores) tx.objectStore(s).clear();
+  await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
+  for (const k of ['decks', 'presets', 'notetypes', 'notes', 'cards']) S[k].clear();
+  S.revlog = []; S.nc.clear(); invalidateDecks();
 }
 export function getMedia(name) {
   return new Promise(res => {

@@ -99,9 +99,27 @@ There is no build step. External libraries (KaTeX, JSZip, sql.js, fzstd) load fr
 
 Pinch and double-tap zoom are disabled so the app behaves like a native one. Installing it also makes the browser less likely to clear its storage. You can check the storage status in Settings → Data.
 
+## Syncing between devices
+
+Mnemo can keep the same collection on your phone and your computer through a free [Supabase](https://supabase.com) project that you own. Sync is optional; without it, everything stays on the device.
+
+1. Create a free Supabase account and a new project (the free plan allows two active projects).
+2. In the project, open **SQL Editor**, paste the contents of `supabase-setup.sql` (also available from Settings → Sync → Setup guide → Copy the SQL script) and click **Run**.
+3. In **Authentication → Sign In / Providers → Email**, turn off **Confirm email** so you can sign in immediately.
+4. Copy the project URL and the publishable key (`sb_publishable_…`, or the legacy anon key) from the project's **Connect** dialog or **Project Settings → API Keys**.
+5. In Mnemo, open **Settings → Sync**, paste the URL and key, then create your account. On every other device, enter the same URL and key and sign in.
+
+How it works:
+
+- Every note, card, deck, preset, note type and review is stored as one row protected by row-level security, so each account only sees its own data. Images and audio go to a private storage bucket.
+- Mnemo syncs when it opens, a few seconds after each change, when you come back online, and every two minutes while it is open. It keeps working offline in between.
+- When the same item was changed on two devices, the most recent change wins. Review histories from both devices are combined.
+- The first time a device that already has cards signs in, Mnemo asks whether to merge both collections, keep only the cloud, or keep only that device.
+- Free Supabase projects pause after a week without activity. Restore the project from the Supabase dashboard; Mnemo keeps working offline until then.
+
 ## Your data
 
-Everything lives in the browser's IndexedDB on the device you use. Different devices and browsers keep separate collections; there is no sync. Back up regularly with **Settings → Back up collection** and restore the `.zip` on another device to move your collection. Exporting to `.apkg` lets you continue in Anki at any time.
+Everything lives in the browser's IndexedDB on the device you use. Without sync, different devices and browsers keep separate collections. Back up regularly with **Settings → Back up collection** and restore the `.zip` on another device to move your collection. Exporting to `.apkg` lets you continue in Anki at any time.
 
 ## Keyboard shortcuts
 
@@ -124,7 +142,7 @@ In the editor: Ctrl+Shift+C adds a cloze, Ctrl+M wraps the selection in math, Ct
 
 ## Notes and limits
 
-- Anki sync servers can't be reached from a third-party web app, so AnkiWeb sync isn't available. Use `.apkg` export/import or backups to move data.
+- Anki sync servers can't be reached from a third-party web app, so AnkiWeb sync isn't available. Use Mnemo's own Supabase sync, `.apkg` export/import or backups to move data.
 - FSRS uses the default FSRS-5 parameters. To personalize them, run the optimizer in Anki desktop and paste the 19 parameters into the deck preset.
 - JavaScript inside card templates is disabled by default; enable it in Settings only for decks you trust.
 
@@ -144,6 +162,8 @@ stats.js              Statistics and charts
 importers.js          All import formats
 exporters.js          .apkg, text, JSON, backup
 db.js                 IndexedDB storage
+sync.js               Optional Supabase sync
+supabase-setup.sql    Database setup for sync
 i18n.js, i18n-en.js   Language switching and English strings
 sw.js                 Service worker for offline use
 manifest.webmanifest  Install metadata and icons

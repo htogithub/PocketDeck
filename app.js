@@ -2,7 +2,8 @@
 import { S, saveSettings, saveDeck, deckByName, renameDeck, deleteDeck, deckChildren, deckSubtree, topDecks, deckLeaf, presetOf, deckParent, deckAncestors, invalidateDecks,
   notetypeOf, noteCards, sortText, deleteNotes, addTags, removeTags, parseTags, saveCard, persist, defaultPreset, saveNotetype,
   notesOfType, genCards, updateNote, deleteCard, uniqueNotetypeName, builtinDef, BUILTIN_KEYS, localizeDefaults, DEFAULT_W, saveNote } from './state.js';
-import { h, ic, $, esc, toast, today, dayStart, fmtIvl, fmtDuration, truncate, hash32, saveFile, debounce, setRollover, newId, stripHtml, dayLabel } from './util.js';
+import { h, ic, $, esc, toast, today, dayStart, fmtIvl, fmtDuration, truncate, hash32, saveFile, debounce, setRollover, newId, stripHtml, dayLabel, dateTime } from './util.js';
+import { initSync, sync, syncNow, signIn, signUp, signOut, setConfig, forgetConfig, configured, loggedIn, resetFrom, SETUP_SQL } from './sync.js';
 import { t, tn, setLang, getLang, detectLang } from './i18n.js';
 import { loadAll, flush, storageInfo, requestPersist, wipeAll } from './db.js';
 import { Session, deckCounts, previewIntervals, setSuspended, bury, forget, setFlag, extendLimit, recomputeMemory, unburyIfNewDay } from './sched.js';
@@ -15,7 +16,7 @@ import * as EX from './exporters.js';
 import { go, header, iconBtn, sheet, menu, ask, confirmBox, deckSelect, deckOptions, seg, toggle, setRow, linkRow, section,
   cardStatus, templateName, cardInfo, noteEditor, closeAllSheets, sheetOpen } from './ui.js';
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 let cleanup = null, pendingSession = null, routeToken = 0;
 
 // ---------- thème ----------
@@ -90,6 +91,125 @@ function route() {
   }).catch(e => { console.error(e); el.append(h('p', { class: 'error' }, e.message)); });
 }
 const rerender = () => route();
+
+// ---------- synchronisation (interface) ----------
+function ago(ts) {
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 45) return t("à l'instant");
+  const m = Math.round(s / 60);
+  return m < 60 ? t('il y a {n} min', { n: m }) : t('le {d}', { d: dateTime(ts) });
+}
+function syncStatusText() {
+  const s = sync.state;
+  switch (s.status) {
+    case 'syncing': return s.progress || t('Synchronisation…');
+    case 'idle': return s.error || (s.lastSync ? t('Synchronisé {t}', { t: ago(s.lastSync) }) : t('Prêt'));
+    case 'offline': return t('Hors ligne : synchro au retour du réseau');
+    case 'error': return t('Erreur : {e}', { e: s.error });
+    case 'loggedout': return s.error || t('Non connecté');
+    default: return t('Désactivée');
+  }
+}
+function syncIndicator() {
+  if (!configured()) return { el: null, off: () => {} };
+  const b = iconBtn('cloud', t('Synchronisation'), () => { if (loggedIn()) { syncNow(); toast(t('Synchronisation…')); } else go('settings'); });
+  const upd = () => { b.className = 'icon-btn sync-ind ' + sync.state.status; b.title = syncStatusText(); b.setAttribute('aria-label', b.title); };
+  upd();
+  return { el: b, off: sync.onChange(upd) };
+}
+function firstSyncChoice() {
+  return new Promise(res => {
+    let done = false;
+    const pick = v => { done = true; close(); res(v); };
+    const close = sheet(t('Première synchronisation'), h('div', { class: 'form' },
+      h('p', null, t('Le cloud contient déjà une collection, et cet appareil aussi. Que veux-tu faire ?')),
+      h('button', { class: 'btn primary', onclick: () => pick('merge') }, t('Fusionner les deux (recommandé)')),
+      h('button', { class: 'btn', onclick: () => pick('cloud') }, t('Garder seulement le cloud')),
+      h('button', { class: 'btn', onclick: () => pick('device') }, t('Garder seulement cet appareil')),
+      h('p', { class: 'muted small' }, t('« Garder seulement » supprime l\'autre version. Dans le doute, fusionne.'))),
+      { onClose: () => { if (!done) res(null); } });
+  });
+}
+function syncGuide() {
+  const steps = [
+    t('Crée un compte gratuit sur supabase.com, puis un nouveau projet (New project). Choisis la région la plus proche, par exemple Frankfurt. Le mot de passe de la base ne sert pas à Mnemo, mais garde-le.'),
+    t('Dans le projet, ouvre SQL Editor, colle le script (bouton ci-dessous) et clique sur Run. « Success » confirme que c\'est bon.'),
+    t('Dans Authentication → Sign In / Providers → Email, désactive « Confirm email » pour pouvoir te connecter tout de suite.'),
+    t('Clique sur Connect en haut du projet (ou Project Settings → API Keys) et copie l\'URL du projet et la clé publishable (sb_publishable_…). L\'ancienne clé anon fonctionne aussi.'),
+    t('Colle l\'URL et la clé dans Mnemo, enregistre, puis crée ton compte. Sur tes autres appareils : même URL, même clé, puis « Se connecter ».'),
+  ];
+  const ta = h('textarea', { class: 'input code', rows: 10, readonly: true }); ta.value = SETUP_SQL;
+  sheet(t('Configurer la synchronisation'), h('div', { class: 'form' },
+    h('ol', { class: 'steps' }, steps.map(s => h('li', null, s))),
+    h('button', { class: 'btn primary', onclick: async () => {
+      try { await navigator.clipboard.writeText(SETUP_SQL); toast(t('Script copié')); }
+      catch { ta.closest('details').open = true; ta.focus(); ta.select(); toast(t('Sélectionne le texte et copie-le.')); }
+    } }, t('Copier le script SQL')),
+    h('details', null, h('summary', null, t('Voir le script')), ta),
+    h('p', { class: 'muted small' }, t('Gratuit : 2 projets actifs par compte Supabase. Un projet gratuit se met en pause après une semaine sans utilisation : réactive-le depuis supabase.com. Mnemo reste utilisable hors ligne entre-temps.'))), { cls: 'tall' });
+}
+function syncSection() {
+  const box = h('div', { class: 'set-list' });
+  const el = h('section', { class: 'set-sec' }, h('h2', null, t('Synchronisation')), box);
+  let mode = null, statusEl = null, syncBtn = null, loginNote = null;
+  const modeOf = () => !configured() ? 'cfg' : !loggedIn() ? 'login' : 'on';
+  const field = (label, input) => h('label', { class: 'mini' }, h('span', null, label), input);
+  function render() {
+    mode = modeOf();
+    const s = sync.state;
+    if (mode === 'cfg') {
+      const url = h('input', { class: 'input', placeholder: 'https://xxxx.supabase.co', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', inputmode: 'url' });
+      const key = h('input', { class: 'input', placeholder: 'sb_publishable_…', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' });
+      box.replaceChildren(
+        h('div', { class: 'set-row col' },
+          h('div', { class: 'set-label' }, h('span', null, t('Synchroniser tes appareils')),
+            h('small', null, t('Avec un projet Supabase gratuit, ta collection est la même sur ton téléphone et ton ordinateur. Compte environ 5 minutes de configuration.'))),
+          h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: syncGuide }, ic('help', 16), t('Guide de configuration')))),
+        h('div', { class: 'set-row col' }, field(t('URL du projet'), url), field(t('Clé publishable (ou anon)'), key),
+          h('div', { class: 'row' }, h('button', { class: 'btn primary small', onclick: () => {
+            try { setConfig(url.value, key.value); toast(t('Projet enregistré')); } catch (e) { toast(e.message); }
+          } }, t('Enregistrer')))));
+      return;
+    }
+    if (mode === 'login') {
+      const email = h('input', { class: 'input', type: 'email', placeholder: t('E-mail'), autocomplete: 'username', autocapitalize: 'off', autocorrect: 'off' });
+      const pw = h('input', { class: 'input', type: 'password', placeholder: t('Mot de passe (6 caractères minimum)'), autocomplete: 'current-password' });
+      loginNote = h('small', null, s.error || t('Utilise le même compte sur tous tes appareils.'));
+      const run = async (fn, btn) => {
+        if (!email.value.includes('@') || pw.value.length < 6) { toast(t('Saisis un e-mail et un mot de passe de 6 caractères minimum.')); return; }
+        btn.disabled = true;
+        try { const r = await fn(email.value, pw.value); if (r === 'confirm') toast(t('Compte créé : valide le lien reçu par e-mail, puis connecte-toi. (Ou désactive « Confirm email » dans Supabase.)'), 7000); }
+        catch (e) { toast(e.message, 5000); }
+        finally { btn.disabled = false; }
+      };
+      const inBtn = h('button', { class: 'btn primary small', onclick: () => run(signIn, inBtn) }, t('Se connecter'));
+      const upBtn = h('button', { class: 'btn small', onclick: () => run(signUp, upBtn) }, t('Créer un compte'));
+      box.replaceChildren(
+        h('div', { class: 'set-row col' }, h('div', { class: 'set-label' }, h('span', null, t('Connexion')), loginNote), email, pw, h('div', { class: 'row wrap' }, inBtn, upBtn)),
+        linkRow(t('Changer de projet Supabase'), async () => { if (await confirmBox(t('Oublier ce projet sur cet appareil ? Tes données locales et celles du cloud ne sont pas effacées.'))) forgetConfig(); }, new URL(sync.state.cfg.url).host));
+      return;
+    }
+    statusEl = h('small', null, syncStatusText());
+    syncBtn = h('button', { class: 'btn small', disabled: s.busy, onclick: () => syncNow() }, ic('refresh', 16), t('Synchroniser'));
+    box.replaceChildren(
+      setRow(t('Compte'), h('span', { class: 'muted small' }, s.auth?.user?.email || '')),
+      h('div', { class: 'set-row' }, h('div', { class: 'set-label' }, h('span', null, t('État')), statusEl), syncBtn),
+      h('details', { class: 'adv' }, h('summary', null, t('Options avancées')),
+        h('div', { class: 'stack pad' },
+          h('button', { class: 'btn small', onclick: async () => { if (await confirmBox(t('Remplacer la collection de cet appareil par celle du cloud ?'), { danger: true, ok: t('Remplacer') })) resetFrom('cloud'); } }, t('Remplacer cet appareil par le cloud')),
+          h('button', { class: 'btn small', onclick: async () => { if (await confirmBox(t('Remplacer le cloud par cet appareil ? Ce qui n\'existe pas ici sera supprimé sur tous tes appareils.'), { danger: true, ok: t('Remplacer') })) resetFrom('device'); } }, t('Remplacer le cloud par cet appareil')),
+          h('button', { class: 'btn small danger', onclick: async () => { await signOut(); toast(t('Déconnecté')); } }, t('Se déconnecter')))));
+  }
+  render();
+  const off = sync.onChange(() => {
+    if (modeOf() !== mode) return render();
+    if (statusEl) statusEl.textContent = syncStatusText();
+    if (syncBtn) syncBtn.disabled = sync.state.busy;
+    if (loginNote && sync.state.error) loginNote.textContent = sync.state.error;
+  });
+  const tick = setInterval(() => { if (statusEl) statusEl.textContent = syncStatusText(); }, 30000);
+  return { el, off: () => { off(); clearInterval(tick); } };
+}
 
 // ---------- paquets et dossiers ----------
 const isFolder = id => !!S.decks.get(id)?.folder;
@@ -220,7 +340,9 @@ function deckListEl(ids, counts, { hideEmptyDefault = false } = {}) {
 
 function viewDecks(el) {
   const counts = deckCounts();
-  el.append(header({ title: 'PocketDeck', cls: 'brand', actions: [
+  const ind = syncIndicator();
+  el.append(header({ title: 'Mnemo', cls: 'brand', actions: [
+    ind.el,
     iconBtn('upload', t('Importer'), () => go('import')),
     iconBtn('more', t('Plus'), () => menu(t('Collection'), [
       { label: t('Créer un paquet'), icon: 'plus', onclick: () => createDeck() },
@@ -234,8 +356,9 @@ function viewDecks(el) {
     el.append(h('div', { class: 'empty' },
       h('h2', null, t('Votre collection est vide')),
       h('p', null, t('Ajoutez une première note ou importez un paquet Anki (.apkg), un CSV, un fichier Markdown ou un QCM au format GIFT.')),
-      h('div', { class: 'actions center' }, h('a', { class: 'btn primary', href: '#/add' }, t('Ajouter une note')), h('a', { class: 'btn', href: '#/import' }, t('Importer')))));
-    return;
+      h('div', { class: 'actions center' }, h('a', { class: 'btn primary', href: '#/add' }, t('Ajouter une note')), h('a', { class: 'btn', href: '#/import' }, t('Importer'))),
+      !configured() ? h('p', { class: 'muted small' }, h('a', { href: '#/settings', class: 'link' }, t('Synchroniser avec un autre appareil'))) : null));
+    return ind.off;
   }
   const tops = topDecks();
   let due = 0; for (const id of tops) { const c = counts.get(id); due += c.new + c.learn + c.rev; }
@@ -243,6 +366,7 @@ function viewDecks(el) {
   el.append(deckListEl(tops, counts, { hideEmptyDefault: true }), h('div', { class: 'actions center' },
     h('button', { class: 'btn ghost', onclick: () => createDeck() }, ic('plus', 18), t('Créer un paquet')),
     h('button', { class: 'btn ghost', onclick: () => createDeck(null, { folder: true }) }, ic('folder', 18), t('Créer un dossier'))));
+  return ind.off;
 }
 
 function viewDeck(el, id) {
@@ -742,10 +866,12 @@ function viewSettings(el) {
   const storage = h('small', null, '…');
   storageInfo().then(s => { storage.textContent = (s.usage != null ? t('{a} Mo utilisés', { a: (s.usage / 1048576).toFixed(1) }) + ' — ' : '') + (s.persisted ? t('stockage protégé') : t('stockage non protégé : le navigateur peut l\'effacer s\'il manque de place')); });
 
+  const syncSec = syncSection();
   el.append(header({ title: t('Réglages') }),
     section(t('Langue'), setRow('Language', seg([['fr', 'Français'], ['en', 'English']], getLang(), v => {
       setLang(v); st.lang = v; localizeDefaults(v); saveSettings(); buildTabbar(); rerender();
     }))),
+    syncSec.el,
     section(t('Apparence'),
       setRow(t('Thème'), seg([['system', t('Auto')], ['light', t('Clair')], ['dark', t('Sombre')], ['amoled', 'AMOLED']], st.theme, v => set('theme', v, theme), { small: true })),
       setRow(t('Couleur d\'accent'), accentBox),
@@ -793,7 +919,8 @@ function viewSettings(el) {
         if (!await confirmBox(t('Vraiment ? Cette action est irréversible.'), { danger: true, ok: t('Effacer définitivement') })) return;
         await wipeAll(); try { localStorage.removeItem('mnemo-theme'); } catch {} location.hash = ''; location.reload();
       } }, t('Effacer toutes les données')))),
-    h('p', { class: 'about' }, `Mnemo ${VERSION} — `, t('fonctionne hors ligne, vos données restent sur cet appareil.')));
+    h('p', { class: 'about' }, `Mnemo ${VERSION} — `, configured() ? t('fonctionne hors ligne et se synchronise via ton projet Supabase.') : t('fonctionne hors ligne, vos données restent sur cet appareil.')));
+  return syncSec.off;
 }
 
 // ---------- types de notes ----------
@@ -1299,6 +1426,12 @@ async function boot() {
   applyTheme();
   buildTabbar();
   unburyIfNewDay();
+  initSync();
+  sync.chooser = firstSyncChoice;
+  sync.onRemote = () => {
+    const name = location.hash.replace(/^#\/?/, '').split(/[/?]/)[0] || 'decks';
+    if (['decks', 'deck', 'stats'].includes(name) && !sheetOpen()) rerender();
+  };
   // Pas de zoom : Safari ignore user-scalable=no, on bloque donc les gestes de pincement
   for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault(), { passive: false });
   document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
